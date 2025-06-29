@@ -3,12 +3,11 @@ from pathlib import Path
 from glob import glob
 
 
-# ── helpers ──────────────────────────────────────────────────────────────
+# ── helpers ─────────────────────────────────────────────────────────────
 def _default_arduino_lib_dir() -> Path:
-    home = Path.home()
-    return (home / "Documents" / "Arduino" / "libraries"
-            if (home / "Documents").exists()           # Windows / macOS
-            else home / "Arduino" / "libraries")       # Linux
+    h = Path.home()
+    return h / "Documents" / "Arduino" / "libraries" if (h / "Documents").exists() \
+           else h / "Arduino" / "libraries"
 
 
 _TEMPLATE_PROPERTIES = """\
@@ -25,10 +24,10 @@ architectures=*
 
 
 class WorkdirWidget:
-    # element keys
     VERIFY, CREATE, STRUCT = "-VERIFY-", "-CREATE-", "-STRUCT-"
     TOGGLE, SAVE           = "-TOGGLELIB-", "-SAVELIB-"
     LISTBTN                = "-LISTCOMP-"
+    NEWBTN, EDITBTN        = "-NEWCOMP-", "-EDITCOMP-"
     WORKDIR, NICK          = "-WORKDIR-", "-NICKNAME-"
     LIBTXT, LIBCOL         = "-LIBTXT-", "-LIBCOL-"
     LISTCOL, COMPLIST      = "-LISTCOL-", "-COMPLIST-"
@@ -36,8 +35,8 @@ class WorkdirWidget:
     def __init__(self) -> None:
         default = _default_arduino_lib_dir()
 
-        # ── top controls ───────────────────────────────────────────────
-        self.layout: list[list[sg.Element]] = [
+        # ── controls top rows ─────────────────────────────────────────
+        self.layout = [
             [
                 sg.Text("Working directory:", size=(16, 1)),
                 sg.InputText(str(default), key=self.WORKDIR, expand_x=True),
@@ -53,96 +52,95 @@ class WorkdirWidget:
                 sg.Button("Create structure", key=self.STRUCT, disabled=True),
                 sg.Button("Show structure info", key=self.TOGGLE, disabled=True),
                 sg.Button("Show components", key=self.LISTBTN, disabled=True),
+                sg.Button("Create component", key=self.NEWBTN, disabled=True),
+                sg.Button("Edit component", key=self.EDITBTN, disabled=True),
             ],
         ]
 
-        # ── shared space (one slot, two over-laid panels) ──────────────
-        shared_space = sg.Column(
+        # ── shared area (editor ↔ list) ───────────────────────────────
+        shared = sg.Column(
             [[
-                sg.Column(  # library.properties editor
+                sg.Column(
                     [
                         [sg.Text("library.properties content:")],
                         [sg.Multiline("", size=(80, 12), key=self.LIBTXT)],
                         [sg.Button("Save properties", key=self.SAVE)],
                     ],
-                    key=self.LIBCOL,
-                    visible=False,
-                    expand_x=True,
+                    key=self.LIBCOL, visible=False, expand_x=True,
                 ),
-                sg.Column(  # component list
+                sg.Column(
                     [
                         [sg.Text("Components in library:")],
-                        [sg.Listbox(values=[], size=(80, 12), key=self.COMPLIST)],
+                        [sg.Listbox(values=[], size=(80, 12),
+                                    key=self.COMPLIST, enable_events=True)],
                     ],
-                    key=self.LISTCOL,
-                    visible=False,
-                    expand_x=True,
+                    key=self.LISTCOL, visible=False, expand_x=True,
                 ),
             ]],
             expand_x=True,
         )
+        self.layout.append([shared])
 
-        self.layout += [[shared_space]]
-
-    # ── helpers ────────────────────────────────────────────────────────
+    # ── helpers ───────────────────────────────────────────────────────
     def _effective_path(self, vals) -> Path:
         base = Path(vals[self.WORKDIR]).expanduser()
         nick = vals[self.NICK].strip()
         return base / nick if nick else base
 
     def _structure_ok(self, root: Path) -> bool:
-        return all([
-            (root / "SRC").is_dir(),
-            (root / "Visuino" / "images").is_dir(),
-            (root / "library.properties").is_file(),
-            (root / "visuino.library").is_file(),
-        ])
+        return all((root / p).exists() for p in
+                   ["SRC", "Visuino/images", "library.properties", "visuino.library"])
 
-    def _build_structure(self, root: Path) -> None:
-        (root / "SRC").mkdir(parents=True, exist_ok=True)
-        (root / "Visuino" / "images").mkdir(parents=True, exist_ok=True)
-        lp = root / "library.properties"
-        if not lp.exists():
-            lp.write_text(_TEMPLATE_PROPERTIES, encoding="utf-8")
-        (root / "visuino.library").touch(exist_ok=True)
+    def _scan_components(self, root: Path, nickname: str) -> list[str]:
+        pat = f"{nickname}*.vcomp" if nickname else "*.vcomp"
+        out = []
+        for p in glob(str(root / "Visuino" / pat)):
+            stem = Path(p).stem
+            if nickname and stem.startswith(nickname + "."):
+                stem = stem[len(nickname) + 1:]
+            out.append(stem)
+        return out
 
-    def _load_lib_text(self, root: Path) -> str:
-        lp = root / "library.properties"
-        return lp.read_text(encoding="utf-8") if lp.is_file() else _TEMPLATE_PROPERTIES
+    # --- create .vcomp skeleton --------------------------------------
+    def _create_component_file(self, root: Path, nick: str, comp: str) -> str:
+        if not comp:
+            return "⚠️ No component name entered."
+        fname = f"{nick}.{comp}.vcomp" if nick else f"{comp}.vcomp"
+        fpath = root / "Visuino" / fname
+        try:
+            fpath.touch(exist_ok=False)
+            return f"✅ Created {fname}"
+        except FileExistsError:
+            return f"⚠️ {fname} already exists."
+        except Exception as e:
+            return f"❌ Error creating component: {e}"
 
-    def _scan_components(self, root: Path) -> list[str]:
-        vcomps  = glob(str(root / "Visuino" / "*.vcomp"))
-        headers = glob(str(root / "SRC" / "*.h"))
-        cpps    = glob(str(root / "SRC" / "*.cpp"))
-        return [Path(p).name for p in (vcomps + headers + cpps)]
-
-    # ── dispatcher ─────────────────────────────────────────────────────
-    def handle_event(self, event: str, vals: dict, win: sg.Window) -> str | None:
+    # ── dispatcher ────────────────────────────────────────────────────
+    def handle_event(self, event, vals, win) -> str | None:
         root = self._effective_path(vals)
+        nick = vals[self.NICK].strip()
 
         # ---------- VERIFY ----------
         if event == self.VERIFY:
             if root.exists():
                 if self._structure_ok(root):
-                    win[self.CREATE].update(disabled=True)
+                    # structure already fine
+                    for k in (self.TOGGLE, self.LISTBTN):
+                        win[k].update(disabled=False)
                     win[self.STRUCT].update(disabled=True)
-                    win[self.TOGGLE].update(disabled=False, text="Show structure info")
-                    win[self.LISTBTN].update(disabled=False, text="Show components")
-                    return f"✅ Directory & structure OK: {root}"
+                    win[self.CREATE].update(disabled=True)
+                    win[self.EDITBTN].update(disabled=True)
+                    return "✅ Directory & structure OK."
                 else:
+                    # dir exists, structure missing → enable STRUCT
                     win[self.CREATE].update(disabled=True)
                     win[self.STRUCT].update(disabled=False)
-                    win[self.TOGGLE].update(disabled=True)
-                    win[self.LISTBTN].update(disabled=True)
-                    return "✅ Directory exists but structure incomplete."
+                    return "ℹ️ Directory exists, create structure next."
             else:
+                # dir missing → enable CREATE
                 win[self.CREATE].update(disabled=False)
                 win[self.STRUCT].update(disabled=True)
-                win[self.TOGGLE].update(disabled=True, text="Show structure info")
-                win[self.LISTBTN].update(disabled=True, text="Show components")
-                win[self.LIBCOL].update(visible=False)
-                win[self.LISTCOL].update(visible=False)
-                return "👍 Directory does NOT exist. Press Create."
+                return "👍 Ready to create directory."
 
         # ---------- CREATE ----------
         if event == self.CREATE:
@@ -150,60 +148,86 @@ class WorkdirWidget:
                 root.mkdir(parents=True, exist_ok=False)
                 win[self.CREATE].update(disabled=True)
                 win[self.STRUCT].update(disabled=False)
-                return f"✅ Created directory: {root}"
-            except FileExistsError:
-                return "⚠️ Directory already exists."
+                return "✅ Directory created."
             except Exception as e:
-                return f"❌ Error: {e}"
+                return f"❌ {e}"
 
         # ---------- CREATE STRUCTURE ----------
         if event == self.STRUCT:
             try:
-                self._build_structure(root)
-                win[self.LIBTXT].update(self._load_lib_text(root))
+                (root / "SRC").mkdir(parents=True, exist_ok=True)
+                (root / "Visuino" / "images").mkdir(parents=True, exist_ok=True)
+                (root / "visuino.library").touch(exist_ok=True)
+                if not (root / "library.properties").exists():
+                    (root / "library.properties").write_text(_TEMPLATE_PROPERTIES)
+                # show editor panel
+                win[self.LIBTXT].update((root / "library.properties").read_text())
                 win[self.LIBCOL].update(visible=True)
-                win[self.LISTCOL].update(visible=False)
                 win[self.TOGGLE].update(disabled=False, text="Hide structure info")
-                win[self.LISTBTN].update(disabled=False, text="Show components")
+                win[self.LISTBTN].update(disabled=False)
+                win[self.NEWBTN].update(disabled=True)
                 win[self.STRUCT].update(disabled=True)
-                return f"✅ Structure created in {root}"
+                return "✅ Structure scaffolded."
             except Exception as e:
-                return f"❌ Error creating structure: {e}"
+                return f"❌ {e}"
 
-        # ---------- TOGGLE STRUCTURE INFO ----------
+        # ---------- TOGGLE editor ----------
         if event == self.TOGGLE:
-            visible_now = win[self.LIBCOL].visible
-            if not visible_now:
-                win[self.LIBTXT].update(self._load_lib_text(root))
-            win[self.LIBCOL].update(visible=not visible_now)
+            vis = win[self.LIBCOL].visible
+            win[self.LIBCOL].update(visible=not vis)
             win[self.LISTCOL].update(visible=False)
-            win[self.TOGGLE].update(text="Hide structure info" if not visible_now
+            win[self.TOGGLE].update(text="Hide structure info" if not vis
                                     else "Show structure info")
             win[self.LISTBTN].update(text="Show components")
+            win[self.NEWBTN].update(disabled=True)
+            win[self.EDITBTN].update(disabled=True)
+            if not vis:
+                win[self.LIBTXT].update((root / "library.properties").read_text())
             return None
 
-        # ---------- LIST COMPONENTS (toggle) ----------
+        # ---------- LIST components ----------
         if event == self.LISTBTN:
-            visible_now = win[self.LISTCOL].visible
-            if visible_now:  # hide
+            vis = win[self.LISTCOL].visible
+            if vis:
                 win[self.LISTCOL].update(visible=False)
                 win[self.LISTBTN].update(text="Show components")
+                win[self.NEWBTN].update(disabled=True)
+                win[self.EDITBTN].update(disabled=True)
                 return None
-            # show list
-            comps = self._scan_components(root) if self._structure_ok(root) else []
+            comps = self._scan_components(root, nick)
             win[self.COMPLIST].update(values=comps)
             win[self.LISTCOL].update(visible=True)
             win[self.LIBCOL].update(visible=False)
             win[self.LISTBTN].update(text="Hide components")
+            win[self.NEWBTN].update(disabled=False)
+            win[self.EDITBTN].update(disabled=True)
             win[self.TOGGLE].update(text="Show structure info")
-            return f"📚 {len(comps)} component file(s) found."
+            return f"📚 {len(comps)} component(s)."
 
-        # ---------- SAVE properties ----------
+        # ---------- LIST selection ----------
+        if event == self.COMPLIST:
+            win[self.EDITBTN].update(disabled=not vals[self.COMPLIST])
+            return None
+
+        # ---------- placeholder Create/Edit component ----------
+                # ---------- CREATE component ----------
+        if event == self.NEWBTN:
+            nick = vals[self.NICK].strip()
+            comp = sg.popup_get_text("New component name:",
+                                     title="Create component")
+            if comp is None:        # user cancelled
+                return None
+            comp = comp.strip()
+            msg = self._create_component_file(root, nick, comp)
+            # refresh list
+            files = self._scan_components(root, nick)
+            win[self.COMPLIST].update(values=files)
+            return msg
+
+
+        # ---------- SAVE ----------
         if event == self.SAVE:
-            try:
-                (root / "library.properties").write_text(vals[self.LIBTXT], encoding="utf-8")
-                return "💾 Saved library.properties"
-            except Exception as e:
-                return f"❌ Error saving: {e}"
+            (root / "library.properties").write_text(vals[self.LIBTXT], encoding="utf-8")
+            return "💾 Saved library.properties"
 
         return None

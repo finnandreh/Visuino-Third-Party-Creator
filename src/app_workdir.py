@@ -223,6 +223,44 @@ class WorkdirWidget:
             files = self._scan_components(root, nick)
             win[self.COMPLIST].update(values=files)
             return msg
+        # ---------- EDIT component ----------
+        if event == self.EDITBTN:
+            # Nothing should be enabled if there is no selection, but guard anyway
+            if not vals[self.COMPLIST]:
+                return None
+
+            # Build the full path to the .vcomp the user picked
+            comp_name = vals[self.COMPLIST][0]
+            fname      = f"{nick}.{comp_name}.vcomp" if nick else f"{comp_name}.vcomp"
+            comp_path  = root / "Visuino" / fname
+
+            if not comp_path.exists():
+                sg.popup_error(f"Component file not found:\n{comp_path}")
+                return f"❌ {fname} is missing."
+
+            # Lazy-import to keep startup time low
+            try:
+                from app_edit_component import open_editor
+            except ImportError:
+                sg.popup_error(
+                    "The file 'app_edit_component.py' could not be imported.\n"
+                    "Make sure it is on PYTHONPATH or lives next to your main script."
+                )
+                return "❌ Component editor module missing."
+
+            # Open the modal editor window, disabling the main GUI meanwhile
+            win.disable()
+            try:
+                open_editor(comp_path)
+            finally:
+                win.enable()
+                win.bring_to_front()
+
+            # In case the user renamed or removed things in the editor, refresh list
+            files = self._scan_components(root, nick)
+            win[self.COMPLIST].update(values=files)
+
+            return f"🛠  Finished editing {comp_name}"
 
 
         # ---------- SAVE ----------

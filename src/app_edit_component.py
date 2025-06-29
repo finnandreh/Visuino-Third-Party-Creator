@@ -1,49 +1,76 @@
 """
-Enhanced Visuino component‑editing canvas.
+Enhanced Visuino component‑editing canvas with **Pre Populate** support.
 
-Changes compared with the first draft:
-    • The window is now split down the middle: left side shows a *read‑only* preview
-      of the selected .vcomp file, right side hosts a stub panel with check‑boxes.
-    • Later we will wire those check‑boxes so that ticking one of them triggers
-      a re‑parse of the file and a live update of the preview (or other widgets).
-    • For now the check‑boxes simply log to the console so you can see that the
-      events are coming through.
+Usage flow (quick recap)
+========================
+1. WorkdirWidget still calls `open_editor(path)` when you press **Edit component**.
+2. The editor window splits **left** (read‑only file preview) and **right** (options).
+3. Fill in / tweak the fields on the right, tick *ArduinoLoopBegin* if wanted and
+   click **Pre populate** ➜ the file gets overwritten with a template that pulls
+   in your settings. The preview refreshes instantly so you can keep iterating.
 
-No other files need to change – *open_editor()* is still the entry point that
-WorkdirWidget calls.
+The heavy lifting lives entirely inside this file – you don’t have to touch
+`WorkdirWidget` again.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import PySimpleGUI as sg
 
-
-# ── helpers ────────────────────────────────────────────────────────────
+######################################################################
+# helpers
+######################################################################
 
 def _read_component_text(path: Path) -> str:
     """Return the raw text of the component file (UTF‑8)."""
     try:
-        return path.read_text(encoding="utf‑8")
-    except Exception as err:  # noqa: BLE001 (broad except ok for a UI tool)
+        return path.read_text(encoding="utf-8")
+    except Exception as err:  # noqa: BLE001 – broad except is fine inside a UI tool
         return f"⚠️  Could not read file: {err}"
 
 
-# ── public API ─────────────────────────────────────────────────────────
+def _camel_to_title(s: str) -> str:
+    """Convert *CamelCase* → "Camel Case" for nicer defaults."""
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", s).strip()
 
-def open_editor(comp_path: Path) -> None:  # noqa: D401 (imperative OK)
-    """Modal window that lets the user preview & (later) tweak one component."""
+######################################################################
+# main entry point
+######################################################################
 
-    text = _read_component_text(comp_path)
+def open_editor(comp_path: Path) -> None:  # noqa: D401 – imperative name is OK
+    """Open a modal editor for a single `.vcomp` file."""
 
-    # ── LHS: file preview -------------------------------------------------
+    # ── infer nickname/short‑name from filename --------------------------------
+    stem_parts = comp_path.stem.split(".", 1)
+    if len(stem_parts) == 2:
+        nickname, short = stem_parts
+    else:  # file not prefixed – still allow editing
+        nickname, short = "", stem_parts[0]
+
+    namespace        = f"{nickname}Lib" if nickname else "MyLib"
+    disp_name_def    = _camel_to_title(short)
+    create_name_def  = re.sub(r"\s+", "", disp_name_def)
+    header_def       = f"{create_name_def}.h"
+    categories       = [
+        "TArduinoBooleanFlipFlopsToolbarCategory",
+        "TArduinoMathFunctionsToolbarCategory",
+        "TArduinoSignalSourcesToolbarCategory",
+    ]
+
+    ##################################################################
+    # UI layout
+    ##################################################################
+
+    # Left – file preview -------------------------------------------------------
     lhs = sg.Column(
         [
             [sg.Text("Component file preview:")],
             [
                 sg.Multiline(
-                    text,
+                    _read_component_text(comp_path),
                     size=(80, 28),
                     key="-TXT-",
                     disabled=True,
@@ -58,18 +85,19 @@ def open_editor(comp_path: Path) -> None:  # noqa: D401 (imperative OK)
         expand_y=True,
     )
 
-    # ── RHS: placeholder options -----------------------------------------
+    # Right – options & actions -------------------------------------------------
     rhs = sg.Column(
         [
-            [sg.Text("Parse options (stub):")],
-            [sg.Checkbox("Check A", key="-CHK_A-")],
-            [sg.Checkbox("Check B", key="-CHK_B-")],
-            [sg.Checkbox("Check C", key="-CHK_C-")],
-            [sg.Stretch()],  # push content to the top
+            [sg.Text("Display name:"), sg.InputText(disp_name_def, key="-NAME-", size=(25, 1))],
+            [sg.Text("Header file (.h):"), sg.InputText(header_def, key="-HDR-", size=(25, 1))],
+            [sg.Text("Category:"), sg.Combo(categories, default_value=categories[0], key="-CAT-", readonly=True, size=(35, 1))],
+            [sg.Checkbox("ArduinoLoopBegin", key="-LOOP-")],
+            [sg.Button("Pre populate", key="-PREPOP-", button_color=("white", "green"))],
+            [sg.Stretch()],
         ],
-        expand_y=True,
         element_justification="left",
-        pad=((10, 0), 0),  # a little breathing room after the separator
+        pad=((10, 0), 0),
+        expand_y=True,
     )
 
     layout = [
@@ -85,18 +113,55 @@ def open_editor(comp_path: Path) -> None:  # noqa: D401 (imperative OK)
         resizable=True,
     )
 
-    # Main event‑loop ------------------------------------------------------
+    ##################################################################
+    # event‑loop
+    ##################################################################
+
     while True:
         event, values = win.read()
 
-        # ---- close window ------------------------------------------------
+        # ---- Close window -----------------------------------------------------
         if event in (sg.WINDOW_CLOSED, "Close"):
             break
 
-        # ---- Checkbox stubs ---------------------------------------------
-        if event in ("-CHK_A-", "-CHK_B-", "-CHK_C-"):
-            # For now just print which option was toggled and its state.
-            print(f"{event} → {values[event]}")
-            # TODO: hook up your parser and update widgets accordingly.
+        # ---- Pre‑populate template -------------------------------------------
+        if event == "-PREPOP-":
+            # Gather user settings (fall back to defaults if fields left empty)
+            disp_name = values["-NAME-"].strip() or disp_name_def
+            create_name = re.sub(r"\s+", "", disp_name)
+            header_file = values["-HDR-"].strip() or f"{create_name}.h"
+            loop_flag   = values["-LOOP-"]
+            category    = values["-CAT-"] or categories[0]
+
+            # Build template ---------------------------------------------------
+            tmpl_lines: list[str] = [
+                f"{namespace} : Namespace\n",
+                f"    [Name('{disp_name}')]\n",
+                f"    [CreateName('{create_name}')]\n",
+                f"    [ArduinoInclude( '{header_file}' )]\n",
+            ]
+            if loop_flag:
+                tmpl_lines.append("    [ArduinoLoopBegin]\n")
+            tmpl_lines.extend(
+                [
+                    f"    [ArduinoClass( '{namespace}::{create_name}' )]\n",
+                    f"    [Category( {category} )]\n\n",
+                    f"        +TArduino{create_name}: TArduinoComponent\n\n",
+                    "            InputPin : TOWArduinoDigitalSinkPin\n",
+                    "            OutputPin : TOWArduinoDigitalSourcePin\n\n",
+                    "        ; // TArduinoComponent\n\n\n",
+                    f"; // {namespace}\n",
+                ]
+            )
+            new_text = "".join(tmpl_lines)
+
+            # Write file + update preview -------------------------------------
+            try:
+                comp_path.write_text(new_text, encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001
+                sg.popup_error(f"Could not write file:\n{exc}")
+            else:
+                win["-TXT-"].update(new_text)
+                sg.popup_ok("File successfully pre‑populated!", title="✅ Success")
 
     win.close()
